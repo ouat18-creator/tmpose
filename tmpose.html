@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TM Pose Bridge</title>
+<style>
+  html, body { margin: 0; background: #000; color: #fff; font-family: sans-serif; }
+  canvas { width: 100%; height: auto; display: block; }
+  #s { position: fixed; top: 4px; left: 6px; font-size: 13px;
+       background: rgba(0,0,0,.55); padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="s">준비 중…</div>
+
+<!-- 티처블머신 내보내기 코드와 같은 버전의 라이브러리 (인터넷 연결 필요) -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+
+<script>
+/*
+  앱인벤터 ↔ 이 페이지 약속
+  - 앱 → 페이지 : WebViewer1.WebViewString 에 모델 URL을 넣은 뒤 페이지를 연다
+                  (또는 주소 뒤에 ?model=모델URL)
+  - 페이지 → 앱 : WebViewString 으로 아래 문자열을 보낸다
+        "READY"                         모델과 카메라 준비 완료
+        {"왼쪽":85,"오른쪽":15}          클래스별 확률(0~100, JSON)
+        "ERROR:메시지"                  문제가 생겼을 때
+*/
+const SIZE = 300;        // 카메라 화면 크기(px)
+const INTERVAL = 300;    // 인식 간격(ms) – 너무 짧으면 폰이 느려짐
+
+const AI = window.AppInventor;
+const send = t => { if (AI && AI.setWebViewString) AI.setWebViewString(t); };
+const status = t => { document.getElementById('s').textContent = t; };
+
+function getModelUrl() {
+  const q = new URLSearchParams(location.search).get('model');
+  if (q) return q;
+  if (AI && AI.getWebViewString) {
+    const v = AI.getWebViewString();
+    if (v && v.startsWith('http')) return v;
+  }
+  return '';
+}
+
+let model, webcam, ctx, lastPose = null, busy = false, last = 0;
+
+async function init() {
+  let url = getModelUrl();
+  if (!url) { status('모델 URL 없음'); send('ERROR:모델 URL이 없습니다'); return; }
+  if (!url.endsWith('/')) url += '/';
+
+  try {
+    status('모델 불러오는 중…');
+    model = await tmPose.load(url + 'model.json', url + 'metadata.json');
+  } catch (e) {
+    status('모델 로드 실패'); send('ERROR:모델을 불러오지 못했습니다 - ' + e.message); return;
+  }
+
+  try {
+    status('카메라 여는 중…');
+    webcam = new tmPose.Webcam(SIZE, SIZE, true);   // true = 거울 모드(티처블머신과 동일)
+    await webcam.setup({ facingMode: 'user' });     // 전면 카메라
+    await webcam.play();
+  } catch (e) {
+    status('카메라 실패'); send('ERROR:카메라를 열 수 없습니다 - ' + e.message); return;
+  }
+
+  const c = document.getElementById('c');
+  c.width = SIZE; c.height = SIZE;
+  ctx = c.getContext('2d');
+
+  status('인식 중');
+  send('READY');
+  requestAnimationFrame(loop);
+}
+
+async function predict() {
+  busy = true;
+  try {
+    const { pose, posenetOutput } = await model.estimatePose(webcam.canvas);
+    const pred = await model.predict(posenetOutput);
+    const out = {};
+    pred.forEach(p => { out[p.className] = Math.round(p.probability * 100); });
+    lastPose = pose;
+    send(JSON.stringify(out));
+  } catch (e) { /* 한 프레임 실패는 무시 */ }
+  busy = false;
+}
+
+function loop(ts) {
+  webcam.update();
+  ctx.drawImage(webcam.canvas, 0, 0);
+  if (lastPose) {
+    tmPose.drawKeypoints(lastPose.keypoints, 0.5, ctx);
+    tmPose.drawSkeleton(lastPose.keypoints, 0.5, ctx);
+  }
+  if (!busy && ts - last >= INTERVAL) { last = ts; predict(); }
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener('load', init);
+</script>
+</body>
+</html>
